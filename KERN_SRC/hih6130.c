@@ -2,6 +2,7 @@
 #include <linux/module.h>
 #include <linux/i2c.h>
 #include <linux/delay.h>
+#include <linux/iio/iio.h>
 
 struct hih6130_dev {
 	struct i2c_client *client;
@@ -68,22 +69,79 @@ out:
 	return ret;
 }
 
+static int hih6130_read_raw(struct iio_dev *indio_dev,
+				const struct iio_chan_spec *chan,
+				int *val, int *val2, long int mask)
+{
+	int ret = -EINVAL;
+	struct hih6130_dev *dev = iio_priv(indio_dev);
+
+	ret = hih6130_update_data(dev);
+	if (ret < 0)
+		return ret;
+
+	switch (chan->type) {
+	case IIO_TEMP:
+		mutex_lock(&dev->lock);
+		*val = DIV_ROUND_CLOSEST(dev->temperature, 1000);
+		*val2 = (dev->temperature % 1000) * 1000;
+		mutex_unlock(&dev->lock);
+		return IIO_VAL_INT_PLUS_MICRO;
+
+	case IIO_HUMIDITYRELATIVE:
+		mutex_lock(&dev->lock);
+		*val = DIV_ROUND_CLOSEST(dev->humidity, 1000);
+		*val2 = (dev->humidity % 1000) * 1000;
+		mutex_unlock(&dev->lock);
+		return IIO_VAL_INT_PLUS_MICRO;
+
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	return ret;
+}
+
+static const struct iio_info hih6130_info = {
+		.driver_module = THIS_MODULE,
+		.read_raw = hih6130_read_raw
+};
+
+static const struct iio_chan_spec hih6130_chan_spec[] = {
+	{
+		.type = IIO_TEMP,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_PROCESSED)
+	},
+	{
+		.type = IIO_HUMIDITYRELATIVE,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_PROCESSED)
+	}
+};
+
 static int hih6130_probe(struct i2c_client *client,
 		const struct i2c_device_id *i2c_device_id)
 {
 	struct hih6130_dev *dev;
+	struct iio_dev *indio_dev;
 
-	dev = devm_kzalloc(&client->dev, sizeof(*dev), GFP_KERNEL);
-	if (!dev)
+	indio_dev = devm_iio_device_alloc(&client->dev, sizeof(*dev));
+	if (!indio_dev)
 		return -ENOMEM;
 
-	dev->client = client;
+	dev = iio_priv(indio_dev);
 
+	dev->client = client;
 	mutex_init(&dev->lock);
 
-	i2c_set_clientdata(client, dev);
+	indio_dev->name = client->name;
+	indio_dev->dev.parent = &client->dev;
+	indio_dev->channels = hih6130_chan_spec;
+	indio_dev->num_channels = ARRAY_SIZE(hih6130_chan_spec);
+	indio_dev->info = &hih6130_info;
+	indio_dev->modes = INDIO_DIRECT_MODE;
 
-	return 0;
+	return devm_iio_device_register(&client->dev, indio_dev);
 }
 
 static const struct i2c_device_id hih6130_id[] = {
