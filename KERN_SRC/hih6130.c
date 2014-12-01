@@ -7,8 +7,8 @@
 struct hih6130_dev {
 	struct i2c_client *client;
 
-	int humidity;
-	int temperature;
+	int humidity, raw_humidity;
+	int temperature, raw_temperature;
 	struct mutex lock;
 };
 
@@ -41,28 +41,28 @@ static int hih6130_update_data(struct hih6130_dev *dev)
 		return 0;
 	}
 
-	/* Check the status bits and return if something goes wrong*/
+	/* Check the status bits and return if something goes wrong */
 	if (data[0] & 0xC0) {
 		dev_err(&client->dev, "Failed to fetch the proper value\n");
 		ret = -EINVAL;
 		goto out;
 	}
 
-	dev->humidity = ((data[0] << 8) + data[1]) & 0x3fff;
-	dev->temperature = ((data[2] << 8) + data[3]) >> 2;
+	dev->raw_humidity = ((data[0] << 8) + data[1]) & 0x3fff;
+	dev->raw_temperature = ((data[2] << 8) + data[3]) >> 2;
 
 	/* As of this point, the temperature, say 26.542 is stored as 26542
 	 * Same is the case with humidity
 	 */
-	dev->humidity = DIV_ROUND_CLOSEST(dev->humidity * 1000, 16383) * 100;
+	dev->humidity = DIV_ROUND_CLOSEST(
+			dev->raw_humidity * 1000, 16383) * 100;
 	dev->temperature = DIV_ROUND_CLOSEST(
-				dev->temperature * 1000 * 165, 16383) - 40000;
+			dev->raw_temperature * 1000 * 165, 16383) - 40000;
 
 #ifdef HIH6130_DEBUG
 	dev_info(&client->dev, "Humidity : %u\n", dev->humidity);
 	dev_info(&client->dev, "Temperature : %u\n", dev->temperature);
 #endif
-
 out:
 	mutex_unlock(&dev->lock);
 
@@ -80,20 +80,46 @@ static int hih6130_read_raw(struct iio_dev *indio_dev,
 	if (ret < 0)
 		return ret;
 
-	switch (chan->type) {
-	case IIO_TEMP:
-		mutex_lock(&dev->lock);
-		*val = DIV_ROUND_CLOSEST(dev->temperature, 1000);
-		*val2 = (dev->temperature % 1000) * 1000;
-		mutex_unlock(&dev->lock);
-		return IIO_VAL_INT_PLUS_MICRO;
+	switch (mask) {
+	case IIO_CHAN_INFO_RAW:
+		switch (chan->type) {
+		case IIO_TEMP:
+			mutex_lock(&dev->lock);
+			*val = dev->raw_temperature;
+			mutex_unlock(&dev->lock);
+			return IIO_VAL_INT;
 
-	case IIO_HUMIDITYRELATIVE:
-		mutex_lock(&dev->lock);
-		*val = DIV_ROUND_CLOSEST(dev->humidity, 1000);
-		*val2 = (dev->humidity % 1000) * 1000;
-		mutex_unlock(&dev->lock);
-		return IIO_VAL_INT_PLUS_MICRO;
+		case IIO_HUMIDITYRELATIVE:
+			mutex_lock(&dev->lock);
+			*val = dev->raw_humidity;
+			mutex_unlock(&dev->lock);
+			return IIO_VAL_INT;
+
+		default:
+			ret = -EINVAL;
+			break;
+		}
+
+	case IIO_CHAN_INFO_PROCESSED:
+		switch (chan->type) {
+		case IIO_TEMP:
+			mutex_lock(&dev->lock);
+			*val = DIV_ROUND_CLOSEST(dev->temperature, 1000);
+			*val2 = (dev->temperature % 1000) * 1000;
+			mutex_unlock(&dev->lock);
+			return IIO_VAL_INT_PLUS_MICRO;
+
+		case IIO_HUMIDITYRELATIVE:
+			mutex_lock(&dev->lock);
+			*val = DIV_ROUND_CLOSEST(dev->humidity, 1000);
+			*val2 = (dev->humidity % 1000) * 1000;
+			mutex_unlock(&dev->lock);
+			return IIO_VAL_INT_PLUS_MICRO;
+
+		default:
+			ret = -EINVAL;
+			break;
+		}
 
 	default:
 		ret = -EINVAL;
@@ -111,11 +137,13 @@ static const struct iio_info hih6130_info = {
 static const struct iio_chan_spec hih6130_chan_spec[] = {
 	{
 		.type = IIO_TEMP,
-		.info_mask_separate = BIT(IIO_CHAN_INFO_PROCESSED)
+		.info_mask_separate = BIT(IIO_CHAN_INFO_PROCESSED) |
+					BIT(IIO_CHAN_INFO_RAW)
 	},
 	{
 		.type = IIO_HUMIDITYRELATIVE,
-		.info_mask_separate = BIT(IIO_CHAN_INFO_PROCESSED)
+		.info_mask_separate = BIT(IIO_CHAN_INFO_PROCESSED) |
+					BIT(IIO_CHAN_INFO_RAW)
 	}
 };
 
